@@ -1,94 +1,83 @@
 module divider #(
-    parameter int WIDTH = 32
+    parameter WIDTH = 32
 )(
-    input  logic                  clk,
-    input  logic                  rst_n,
-    input  logic                  start,
-    input  logic [WIDTH-1:0]      dividend,
-    input  logic [WIDTH-1:0]      divisor_in,
-    output logic [WIDTH-1:0]      quotient,
-    output logic [WIDTH-1:0]      remainder,
-    output logic                  done,
-    output logic                  div_by_zero
+    input  logic             clk,
+    input  logic             rst_n,
+    input  logic             start,
+    input  logic [WIDTH-1:0] dividend,
+    input  logic [WIDTH-1:0] divisor_in,
+    output logic [WIDTH-1:0] quotient,
+    output logic [WIDTH-1:0] remainder,
+    output logic             done,
+    output logic             div_by_zero
 );
- 
-    // ---------------------------------------------------------
-    // Señales internas / datapath
-    // ---------------------------------------------------------
-    logic [2*WIDTH-1:0] divisor_reg;     // 64 bits
-    logic [2*WIDTH-1:0] remainder_reg;   // 64 bits
-    logic [WIDTH-1:0]   quotient_reg;    // 32 bits
- 
-    logic [2*WIDTH-1:0] sub_result;
-    logic                remainder_neg;
- 
-    // Carga inicial: Remainder = {32'b0, dividend}, Divisor = {divisor_in, 32'b0}
-    logic load;
-    // Control de shifts y escritura
-    logic shift_div;
-    logic shift_quot;
-    logic write_remainder_sub;
-    logic write_remainder_restore;
- 
-    // ALU de 64 bits: resta Remainder - Divisor
+
+    localparam BITS = 2 * WIDTH;
+
+    // Registros internos
+    logic [BITS-1:0]  divisor_reg;
+    logic [BITS-1:0]  remainder_reg;
+    logic [WIDTH-1:0] quotient_reg;
+
+    // ALU combinacional: Remainder - Divisor
+    logic [BITS-1:0] sub_result;
+    logic            remainder_neg;
     assign sub_result    = remainder_reg - divisor_reg;
-    assign remainder_neg = sub_result[2*WIDTH-1];
- 
-    // ---------------------------------------------------------
-    // Datapath: registros con shift (modular: divisor + quotient)
-    // ---------------------------------------------------------
-    shift_reg_right #(.WIDTH(2*WIDTH)) u_divisor_reg (
-        .clk      (clk),
-        .rst_n    (rst_n),
-        .load     (load),
-        .shift_en (shift_div),
-        .load_val ({divisor_in, {WIDTH{1'b0}}}),
-        .q        (divisor_reg)
+    assign remainder_neg = sub_result[BITS-1];
+
+    // Señales de control
+    logic load, do_subtract, do_restore;
+    logic shift_div, shift_quot, quot_bit;
+
+    // ---------------- Instancia FSM ----------------
+    div_control #(.WIDTH(WIDTH)) u_ctrl (
+        .clk            (clk),
+        .rst_n          (rst_n),
+        .start          (start),
+        .divisor_is_zero(divisor_in == {WIDTH{1'b0}}),
+        .remainder_neg  (remainder_neg),
+        .load           (load),
+        .do_subtract    (do_subtract),
+        .do_restore     (do_restore),
+        .shift_div      (shift_div),
+        .shift_quot     (shift_quot),
+        .quot_bit       (quot_bit),
+        .done           (done),
+        .div_by_zero    (div_by_zero)
     );
- 
-    shift_reg_left #(.WIDTH(WIDTH)) u_quotient_reg (
-        .clk        (clk),
-        .rst_n      (rst_n),
-        .load       (load),
-        .shift_en   (shift_quot),
-        .serial_in  (~remainder_neg), // bit0 = 1 si resta fue exitosa (>=0)
-        .load_val   ({WIDTH{1'b0}}),
-        .q          (quotient_reg)
-    );
- 
-    // Registro Remainder: carga, escribe resultado de resta o restaura
-    // sumando el divisor de vuelta cuando la resta dio negativo.
+
+    // ---------------- Registro Divisor (shift right) ----------------
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            remainder_reg <= '0;
-        end else if (load) begin
-            remainder_reg <= {{WIDTH{1'b0}}, dividend};
-        end else if (write_remainder_sub) begin
-            remainder_reg <= sub_result;
-        end else if (write_remainder_restore) begin
-            remainder_reg <= remainder_reg + divisor_reg; // restaurar
-        end
+        if (!rst_n)
+            divisor_reg <= '0;
+        else if (load)
+            divisor_reg <= {{WIDTH{1'b0}}, divisor_in} << WIDTH; // divisor en mitad alta
+        else if (shift_div)
+            divisor_reg <= divisor_reg >> 1;
     end
- 
-    // ---------------------------------------------------------
-    // FSM de control
-    // ---------------------------------------------------------
-    div_control #(.WIDTH(WIDTH)) u_control (
-        .clk                      (clk),
-        .rst_n                    (rst_n),
-        .start                    (start),
-        .divisor_is_zero          (divisor_in == '0),
-        .remainder_neg            (remainder_neg),
-        .load                     (load),
-        .shift_div                (shift_div),
-        .shift_quot               (shift_quot),
-        .write_remainder_sub      (write_remainder_sub),
-        .write_remainder_restore  (write_remainder_restore),
-        .done                     (done),
-        .div_by_zero              (div_by_zero)
-    );
- 
+
+    // ---------------- Registro Remainder ----------------
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            remainder_reg <= '0;
+        else if (load)
+            remainder_reg <= {{WIDTH{1'b0}}, dividend};
+        else if (do_subtract)
+            remainder_reg <= sub_result;
+        // do_restore: remainder_reg no cambia (ya tiene valor correcto)
+    end
+
+    // ---------------- Registro Quotient (shift left) ----------------
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            quotient_reg <= '0;
+        else if (load)
+            quotient_reg <= '0;
+        else if (shift_quot)
+            quotient_reg <= {quotient_reg[WIDTH-2:0], quot_bit};
+    end
+
     assign quotient  = quotient_reg;
     assign remainder = remainder_reg[WIDTH-1:0];
- 
+
 endmodule
